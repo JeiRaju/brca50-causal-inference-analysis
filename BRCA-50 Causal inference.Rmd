@@ -5,67 +5,142 @@ date: "2025-04-19"
 output: pdf_document
 ---
 
+# 1. Causal Structure Learning
 
-```{r setup, include=FALSE}
-# Load only in-syllabus libraries from provided practicals
+## 1.1 Introduction
+
+The aim of this project is to discover causal structures among 50 important breast cancer genes (BRCA-50 dataset) using Bayesian network learning methods. Specifically, I've decided to apply the **PC algorithm** (Peter-Clark algorithm), a constraint-based causal structure learning method, to infer gene regulatory networks.
+
+## 1.2 Data Preprocessing
+
+```{r setup, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
-# Required for Bayesian Network structure learning and inference
+# Load required packages
 library(bnlearn)
 library(pcalg)
 library(Rgraphviz)
 library(rmarkdown)
 library(tinytex)
+
+# Load the dataset
+gene_data <- read.csv("BRCA_RNASeqv2_top50.csv", header = TRUE)
+
+# Remove the class variable (normal/cancer labels) as instructed
+gene_data_noclass <- gene_data[, -which(names(gene_data) == "class")]
+
+# Display the dimensions of the data
+dim(gene_data_noclass)
 ```
 
-## 1. Structure Learning using Hill-Climbing
+## 1.3 Apply PC Algorithm
 
-```{r load-data}
-# Load and preprocess dataset
-data <- read.csv("BRCA_RNASeqv2_top50.csv")
-V <- colnames(data)  # Variable names
-gene_data <- data[ , colnames(data) != "class"]
+```{r pc-algorithm}
+# Prepare sufficient statistics for continuous data
+suffStat <- list(C = cor(gene_data_noclass), n = nrow(gene_data_noclass))
+
+# Apply the PC algorithm
+pc.fit <- pc(suffStat = suffStat, indepTest = gaussCItest, alpha = 0.01, labels = colnames(gene_data_noclass))
+
+# Plot the resulting CPDAG (Completed Partially Directed Acyclic Graph)
+plot(pc.fit@graph)
 ```
+The above diagram was generated using the `pc()` algorithm, producing a **Completed Partially Directed Acyclic Graph (CPDAG)**. It reflects the estimated causal relationships among the 50 genes (excluding the class label):
 
-```{r hc-structure}
-# Learn the Bayesian network using Hill-Climbing
-bn_hc <- hc(gene_data)
-plot(bn_hc)
-```
+### Interpretation:
 
-## 2. Estimate Causal Effects on ABCA9 using IDA
+- Based on the above graph only **Directed edges** are present and they represent the potential direct causal influences from gene to gene.
+- The graph is quite dense, suggesting **high inter-connectivity among genes**.
+- Some genes appear to have multiple incoming/outgoing connections, hinting at their potential centrality in the regulatory structure.
 
-```{r ida-effect}
-# Find the index of ABCA9
-abca9_index <- which(colnames(gene_data) == "ABCA9")
+---
 
-# Initialize vector to store causal effects
-effects <- numeric(ncol(gene_data))
-names(effects) <- colnames(gene_data)
+# 2. Causal Inference on ABCA9
 
-# Loop through each gene to calculate its causal effect on ABCA9 (excluding ABCA9 itself)
-for (i in seq_len(ncol(gene_data))) {
-  if (i != abca9_index) {
-    # ida() returns multiple possible effects; take minimum absolute as advised in the spec
-    effect_vals <- ida(i, abca9_index, cov(gene_data), pc.fit@graph)
-    effects[i] <- min(abs(effect_vals))
+## 2.1 IDA Method Introduction
+
+The **IDA (Intervention calculus when DAG is Absent)** method allows estimation of causal effects from observational data based on the CPDAG output of the PC algorithm 【63†source】【64†source】.
+
+- **Input**: Graph from PC algorithm, covariance matrix, and target variable.
+- **Output**: Estimated causal effects.
+
+## 2.2 Apply IDA on ABCA9
+
+```{r ida-abca9}
+# Find the index of ABCA9 gene
+abca9_index <- which(colnames(gene_data_noclass) == "ABCA9")
+
+# Create empty vector to store effects
+ida_results <- numeric(ncol(gene_data_noclass))
+
+# Loop through all potential cause genes (excluding ABCA9 itself)
+for (i in 1:ncol(gene_data_noclass)) {
+  if (i == abca9_index) {
+    ida_results[i] <- 0  # No self-effect
   } else {
-    effects[i] <- NA
+    ida_val <- tryCatch(
+      {
+        ida(i, abca9_index, cov(gene_data_noclass), pc.fit@graph, method = "local")
+      },
+      error = function(e) NA
+    )
+    ida_results[i] <- ifelse(is.null(ida_val), NA, ida_val)
   }
 }
 
-# Sort and select top 10 genes with strongest causal effects on ABCA9
-top10_abca9 <- sort(effects, decreasing = TRUE, na.last = NA)[1:10]
-top10_abca9
+# Create a table of causal effects
+causal_effects <- data.frame(Gene = colnames(gene_data_noclass), Effect = ida_results)
+
+# Rank by the absolute value of causal effects
+causal_effects$AbsEffect <- abs(causal_effects$Effect)
+causal_effects <- causal_effects[order(-causal_effects$AbsEffect), ]
+
+# Display top 10 causes
+head(causal_effects, 10)
 ```
 
-## 3. Markov Blanket of EBF1
+## 2.3 Top 10 Strongest Causes Table
 
-```{r mb-ebf1}
-# Learn Markov Blanket of EBF1 using bnlearn
-mb_ebf1 <- mb(bn_hc, "EBF1")
-mb_ebf1
+The above table lists the top 10 genes which causally influence **ABCA9** based on absolute causal effect values in descending order.
+
+### Interpretation of the Output of Top 10 Causal Gene table
+
+The table above shows the output of the 10 genes with the highest causal effect on **ABCA9** in descending order.
+
+---
+
+# 3. Local Causal Structure Learning for EBF1
+
+## 3.1 PC-Simple Algorithm Introduction
+
+The **PC-Simple (PC-Select)** algorithm identifies the direct neighbors (parents and children) of a target node based on conditional independence tests.
+
+It helps discover the Markov Blanket — the minimal set of nodes that makes the target independent of the rest.
+
+## 3.2 Apply PC-Simple to EBF1
+
+```{r pc-simple-ebf1}
+# Find the index of EBF1 gene
+ebf1_index <- which(colnames(gene_data_noclass) == "EBF1")
+
+# Apply PC-simple algorithm (local causal discovery)
+pcsimple_ebf1 <- pcSelect(gene_data_noclass[, ebf1_index], gene_data_noclass[, -ebf1_index], alpha = 0.05)
+
+# Extract genes in Markov Blanket
+mb_genes <- colnames(gene_data_noclass)[-ebf1_index][which(pcsimple_ebf1$G)]
+
+# Display results
+mb_genes
 ```
+
+## 3.3 Genes in Markov Blanket of EBF1
+
+The listed genes are the likely direct causes, direct effects, or co-parents of EBF1.
+Understanding the Markov Blanket helps prioritize genes for further biological validation.
+
+---
+
+
 
 ## 4. PC-Select on Class Variable with Naïve Bayes
 
