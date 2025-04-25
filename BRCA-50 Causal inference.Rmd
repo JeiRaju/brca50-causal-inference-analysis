@@ -1,0 +1,107 @@
+---
+title: "BRCA-50: Causal Gene Network & Classification Analysis"
+author: "Jei Pratheesh"
+date: "2025-04-19"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+# Load only in-syllabus libraries from provided practicals
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+# Required for Bayesian Network structure learning and inference
+library(bnlearn)
+library(pcalg)
+library(Rgraphviz)
+library(rmarkdown)
+library(tinytex)
+```
+
+## 1. Structure Learning using Hill-Climbing
+
+```{r load-data}
+# Load and preprocess dataset
+data <- read.csv("BRCA_RNASeqv2_top50.csv")
+V <- colnames(data)  # Variable names
+gene_data <- data[ , colnames(data) != "class"]
+```
+
+```{r hc-structure}
+# Learn the Bayesian network using Hill-Climbing
+bn_hc <- hc(gene_data)
+plot(bn_hc)
+```
+
+## 2. Estimate Causal Effects on ABCA9 using IDA
+
+```{r ida-effect}
+# Find the index of ABCA9
+abca9_index <- which(colnames(gene_data) == "ABCA9")
+
+# Initialize vector to store causal effects
+effects <- numeric(ncol(gene_data))
+names(effects) <- colnames(gene_data)
+
+# Loop through each gene to calculate its causal effect on ABCA9 (excluding ABCA9 itself)
+for (i in seq_len(ncol(gene_data))) {
+  if (i != abca9_index) {
+    # ida() returns multiple possible effects; take minimum absolute as advised in the spec
+    effect_vals <- ida(i, abca9_index, cov(gene_data), pc.fit@graph)
+    effects[i] <- min(abs(effect_vals))
+  } else {
+    effects[i] <- NA
+  }
+}
+
+# Sort and select top 10 genes with strongest causal effects on ABCA9
+top10_abca9 <- sort(effects, decreasing = TRUE, na.last = NA)[1:10]
+top10_abca9
+```
+
+## 3. Markov Blanket of EBF1
+
+```{r mb-ebf1}
+# Learn Markov Blanket of EBF1 using bnlearn
+mb_ebf1 <- mb(bn_hc, "EBF1")
+mb_ebf1
+```
+
+## 4. PC-Select on Class Variable with Naïve Bayes
+
+```{r discretize}
+# Step 1: Discretize to binary using average threshold
+threshold <- mean(as.matrix(gene_data))  # global average threshold
+disc_data <- as.data.frame(lapply(gene_data, function(x) as.numeric(x > threshold)))
+disc_data$class <- data$class  # retain class labels (C/N)
+```
+
+```{r pcselect}
+# Step 2: Convert class labels to binary: "C" = 1, "N" = 0
+target <- as.numeric(disc_data$class == "C")
+
+# Step 3: Convert predictors to numeric
+predictors <- as.data.frame(lapply(disc_data[ , -which(colnames(disc_data) == "class")], as.numeric))
+
+# Step 4: Apply PC-simple algorithm (no named arguments allowed!)
+pc_selected <- pcSelect(target, predictors, alpha = 0.05)
+
+# Step 5: Extract selected gene names
+selected_genes <- colnames(predictors)[pc_selected$G]
+selected_genes
+```
+
+## 5. Bayesian Inference with gRain
+
+```{r grain}
+# Create a simple CPT example from gRain practical
+yn <- c("yes", "no")
+a <- cptable(~asia, values=c(1,99), levels=yn)
+t.a <- cptable(~tub|asia, values=c(5,95,1,99), levels=yn)
+plist <- compileCPT(list(a, t.a))
+net1 <- grain(plist)
+plot(net1)
+
+# Query marginal probabilities
+querygrain(net1, nodes=c("asia", "tub"), type="marginal")
+```
