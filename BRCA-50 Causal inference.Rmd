@@ -111,72 +111,186 @@ The table above shows the output of the 10 genes with the highest causal effect 
 
 # 3. Local Causal Structure Learning for EBF1
 
-## 3.1 PC-Simple Algorithm Introduction
+## 3.1 IAMB Algorithm Introduction
 
-The **PC-Simple (PC-Select)** algorithm identifies the direct neighbors (parents and children) of a target node based on conditional independence tests.
+The **IAMB (Incremental Association Markov Blanket)** algorithm is a constraint-based local structure learning method implemented in the `bnlearn` package. It identifies the **Markov Blanket** of a target variable by incrementally including and removing features based on conditional independence tests.
 
-It helps discover the Markov Blanket — the minimal set of nodes that makes the target independent of the rest.
+The Markov Blanket includes:
+- The parents of the node,
+- The children of the node,
+- And other parents of its children.
 
-## 3.2 Apply PC-Simple to EBF1
+## 3.2 Apply IAMB Algorithm to EBF1
 
-```{r pc-simple-ebf1}
-# Find the index of EBF1 gene
-ebf1_index <- which(colnames(gene_data_noclass) == "EBF1")
-
-# Apply PC-simple algorithm (local causal discovery)
-pcsimple_ebf1 <- pcSelect(gene_data_noclass[, ebf1_index], gene_data_noclass[, -ebf1_index], alpha = 0.05)
-
-# Extract genes in Markov Blanket
-mb_genes <- colnames(gene_data_noclass)[-ebf1_index][which(pcsimple_ebf1$G)]
-
-# Display results
-mb_genes
+```{r iamb-ebf1}
+# Run IAMB to find Markov Blanket of EBF1
+iamb_ebf1 <- learn.mb(gene_data_noclass,"EBF1", method = "iamb", alpha=0.01)
+iamb_ebf1
 ```
 
 ## 3.3 Genes in Markov Blanket of EBF1
+
+The genes returned represent the **Markov Blanket** of EBF1 according to the IAMB algorithm. These are variables that either influence EBF1 directly or share common children with it, and form the smallest set of variables that makes EBF1 conditionally independent of all others.
 
 The listed genes are the likely direct causes, direct effects, or co-parents of EBF1.
 Understanding the Markov Blanket helps prioritize genes for further biological validation.
 
 ---
 
+# 4. Naïve Bayes Classification: Full vs PC-Set
 
+## 4.1 Objective
 
-## 4. PC-Select on Class Variable with Naïve Bayes
+We compare classification accuracy using:
+- **All genes** as predictors (baseline)
+- **Only the parent and children set of the class variable** (discovered using PC-Simple)
 
-```{r discretize}
-# Step 1: Discretize to binary using average threshold
-threshold <- mean(as.matrix(gene_data))  # global average threshold
-disc_data <- as.data.frame(lapply(gene_data, function(x) as.numeric(x > threshold)))
-disc_data$class <- data$class  # retain class labels (C/N)
+We apply **Naïve Bayes classification with 5-fold cross-validation**.
+
+## 4.2 Discretisation
+
+```{r discretise}
+# Compute the average expression value across all genes and all samples
+overall_mean <- mean(as.matrix(gene_data_noclass))
+
+# Discretise genes into binary (0 = Low, 1 = High) based on overall mean
+disc_genes <- gene_data_noclass
+for (col in colnames(disc_genes)) {
+  disc_genes[[col]] <- ifelse(disc_genes[[col]] > overall_mean, 1, 0)
+}
+
+# Combine discretised gene data with the original class label
+disc_data <- cbind(disc_genes, class = as.factor(gene_data$class))
 ```
 
-```{r pcselect}
-# Step 2: Convert class labels to binary: "C" = 1, "N" = 0
-target <- as.numeric(disc_data$class == "C")
+## 4.3 PC-Simple: Discover Parent/Children of Class
 
-# Step 3: Convert predictors to numeric
-predictors <- as.data.frame(lapply(disc_data[ , -which(colnames(disc_data) == "class")], as.numeric))
+```{r pc-simple-class}
+# Prepare numeric version for PC-simple
+disc_data_classnum <- disc_data
+disc_data_classnum$class <- as.numeric(disc_data_classnum$class)
 
-# Step 4: Apply PC-simple algorithm (no named arguments allowed!)
-pc_selected <- pcSelect(target, predictors, alpha = 0.05)
+# Run PC-simple to find PC set of 'class'
+pc_class <- pcSelect(disc_data_classnum$class,
+                      disc_data_classnum[, -which(names(disc_data_classnum) == "class")],
+                      alpha = 0.05)
 
-# Step 5: Extract selected gene names
-selected_genes <- colnames(predictors)[pc_selected$G]
-selected_genes
+pc_genes <- colnames(disc_data_classnum)[-which(colnames(disc_data_classnum) == "class")][which(pc_class$G)]
+pc_genes
 ```
 
-## 5. Bayesian Inference with gRain
+## 4.4 5-Fold Cross-Validation: All Genes vs PC Genes
 
-```{r grain}
-# Create a simple CPT example from gRain practical
-yn <- c("yes", "no")
-a <- cptable(~asia, values=c(1,99), levels=yn)
-t.a <- cptable(~tub|asia, values=c(5,95,1,99), levels=yn)
-plist <- compileCPT(list(a, t.a))
-net1 <- grain(plist)
-plot(net1)
+```{r nb-classification}
+set.seed(42)
+folds <- createFolds(disc_data$class, k = 5)
 
-# Query marginal probabilities
-querygrain(net1, nodes=c("asia", "tub"), type="marginal")
+acc_all <- c()
+acc_pc <- c()
+
+for (i in 1:5) {
+  train_idx <- unlist(folds[-i])
+  test_idx <- unlist(folds[i])
+
+  # Full model
+  model_all <- naiveBayes(class ~ ., data = disc_data[train_idx, ])
+  pred_all <- predict(model_all, disc_data[test_idx, ])
+  acc_all[i] <- mean(pred_all == disc_data[test_idx, ]$class)
+
+  # PC model
+  model_pc <- naiveBayes(x = disc_data[train_idx, pc_genes], y = disc_data[train_idx, ]$class)
+  pred_pc <- predict(model_pc, disc_data[test_idx, pc_genes])
+  acc_pc[i] <- mean(pred_pc == disc_data[test_idx, ]$class)
+}
+
+# Report average accuracy
+mean(acc_all)
+mean(acc_pc)
 ```
+
+## 4.5 Interpretation
+
+- The **full model** uses all gene features, which may lead to overfitting or include noisy genes.
+- The **PC-set model** focuses only on genes that are directly linked to the class variable.
+- Comparing accuracies helps assess whether causal feature selection improves generalisation.
+- Using all genes for classification achieved a mean accuracy of **95.38%**.  
+- However, selecting only the parents and children of the class variable via PC-Simple and using them as features resulted in a higher mean accuracy of **98.27%**.
+- This demonstrates that causal feature selection can improve classification performance by reducing noise and focusing on the most relevant features.  
+- It suggests that many genes may not contribute useful information for predicting the class label, and that targeting a causally-relevant subset can lead to simpler and more accurate models.
+
+---
+
+# 5. Bayesian Network Inference (Based on Provided Structure)
+
+## 5a. Construct Conditional Probability Tables (CPTs)
+
+```{r construct-cpts}
+# Select relevant genes for the Bayesian network
+disc_selected <- disc_data[, c("CD300LG", "BTNL9", "IGSF10", "ABCA9", "class")]
+
+# Compute CPTs
+cpt_cd300lg <- table(disc_selected$CD300LG) / nrow(disc_selected)
+cpt_btnl9_given_cd300lg <- prop.table(table(disc_selected$BTNL9, disc_selected$CD300LG), margin = 2)
+cpt_class_given_cd300lg <- prop.table(table(disc_selected$class, disc_selected$CD300LG), margin = 2)
+cpt_igsf10_given_class <- prop.table(table(disc_selected$IGSF10, disc_selected$class), margin = 2)
+cpt_abca9_given_igsf10_btnl9 <- prop.table(table(disc_selected$ABCA9, disc_selected$IGSF10, disc_selected$BTNL9), margin = c(2, 3))
+
+# Display CPTs
+cpt_cd300lg
+cpt_btnl9_given_cd300lg
+cpt_class_given_cd300lg
+cpt_igsf10_given_class
+cpt_abca9_given_igsf10_btnl9
+```
+
+## 5b. Estimate Probability: All Genes High
+
+```{r probability-all-high}
+# Compute P(CD300LG=1) * P(BTNL9=1|CD300LG=1) * P(class=C|CD300LG=1) * P(IGSF10=1|class=C) * P(ABCA9=1|IGSF10=1, BTNL9=1)
+
+p_cd300lg_1 <- cpt_cd300lg["1"]
+p_btnl9_1_given_cd300lg_1 <- cpt_btnl9_given_cd300lg["1", "1"]
+p_class_c_given_cd300lg_1 <- cpt_class_given_cd300lg["C", "1"]
+p_igsf10_1_given_class_c <- cpt_igsf10_given_class["1", "C"]
+p_abca9_1_given_igsf10_1_btnl9_1 <- cpt_abca9_given_igsf10_btnl9["1", "1", "1"]
+
+p_joint_all_high <- p_cd300lg_1 * p_btnl9_1_given_cd300lg_1 * p_class_c_given_cd300lg_1 * p_igsf10_1_given_class_c * p_abca9_1_given_igsf10_1_btnl9_1
+
+p_joint_all_high
+```
+
+## 5c. Estimate Probability: Cancer given CD300LG High, BTNL9 Low
+
+To estimate the probability of having cancer when CD300LG = High (1) and BTNL9 = Low (0), we consider the structure of the Bayesian network.
+
+In the given structure, class is a direct child of CD300LG and does not have BTNL9 as a parent. This means that class depends only on CD300LG and is conditionally independent of BTNL9 given CD300LG.
+
+Thus, the conditional probability P(class = C | CD300LG = 1, BTNL9 = 0) simplifies to P(class = C | CD300LG = 1).
+
+```{r probability-cancer}
+# Extract P(class = C | CD300LG = 1) directly from CPT
+p_class_c_given_cd300lg_1 <- cpt_class_given_cd300lg["C", "1"]
+p_class_c_given_cd300lg_1
+```
+
+The resulting probability is approximately **0.2585**.
+
+---
+
+## 5d. Mathematical Proof for 5c
+
+We aim to justify mathematically that:
+
+**P(class = C | CD300LG = 1, BTNL9 = 0) = P(class = C | CD300LG = 1)**
+
+This equality holds based on the structure of the Bayesian network and the properties of d-separation.
+
+In the provided Bayesian network, the variable class is only conditionally dependent on CD300LG, meaning CD300LG is its only parent node. BTNL9 is not a parent nor a child of class. Therefore, by the **Markov condition**, class is conditionally independent of any non-descendant node given its parent.
+
+Hence, we conclude:
+
+**P(class = C | CD300LG = 1, BTNL9 = 0) = P(class = C | CD300LG = 1)**
+
+The result used in part 5c is therefore validated mathematically by the network’s conditional independence assumptions.
+
+---
