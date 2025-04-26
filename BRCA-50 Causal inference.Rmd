@@ -1,55 +1,99 @@
 ---
 title: "BRCA-50: Causal Gene Network & Classification Analysis"
-author: "Jei Pratheesh"
-date: "2025-04-19"
-output: pdf_document
+author: "Jei Pratheesh - SKAJY002 - 110424442"
+date: "2025-04-27"
+output: 
+  pdf_document:
+    latex_engine: xelatex
 ---
 
 # 1. Causal Structure Learning
 
 ## 1.1 Introduction
 
-The aim of this project is to discover causal structures among 50 important breast cancer genes (BRCA-50 dataset) using Bayesian network learning methods. Specifically, I've decided to apply the **PC algorithm** (Peter-Clark algorithm), a constraint-based causal structure learning method, to infer gene regulatory networks.
+The aim of this project is to discover causal structures among 50 important breast cancer genes (BRCA-50 data set) using Bayesian network learning methods. Specifically, I've decided to apply the **PC algorithm** (Peter-Clark algorithm), a constraint-based causal structure learning method, to infer gene regulatory networks.
+
+## Description and Explanation of the PC Algorithm
+
+The PC (Peter-Clark) algorithm is used to infer causal relationships among variables. In this project, variables represent the 50 genes in the BRCA-50 breast cancer data set. The PC algorithm was selected mainly because it is particularly suitable for continuous data and due to the assumption that all relevant variables affecting the observed variables have been measured and there's no hidden confounders.
+
+The PC algorithm proceeds in two phases:
+
+### **Step 1: Learning the Skeleton**
+
+- **Initialization**: A complete undirected graph is created where each node represents a gene.
+- **Conditional Independence Testing**:
+  - For each pair of genes (X, Y), statistical tests are performed to check if X and Y are conditionally independent given a subset of their adjacent genes (Z). If independence is detected, the edge between X and Y is removed.
+  - If conditional independence is found, the edge is removed.
+- **Depth Increment**:
+  - The conditioning set size (depth) is incrementally increased to test higher-order conditional independencies until no more edges can be removed.
+
+At the end of this phase, the remaining undirected edges form the **skeleton** of the graph, capturing direct dependencies between genes.
+
+### **Step 2: Orienting the Edges**
+
+Application of rules such as collider orientation and Meek’s rules to direct the edges without introducing cycles.
+
+- **V-Structure Identification**:  
+  For any triplet (X, Z, Y) where X and Y are not directly connected but both are connected to Z, and Z is not in the separating set of (X, Y), the structure is oriented as a **collider**: X → Z ← Y.
+
+- **Propagation of Orientations (Meek’s Rules)**:  
+  Additional edges are oriented logically using a set of propagation rules to avoid cycles and ensure acyclicity, progressively moving towards a Directed Acyclic Graph (DAG).
+
+The final output is a **Completed Partially Directed Acyclic Graph (CPDAG)**, that represents the causal structure among the genes.
 
 ## 1.2 Data Preprocessing
 
 ```{r setup, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
-# Load required packages
+# Loading required packages
 library(bnlearn)
 library(pcalg)
 library(Rgraphviz)
 library(rmarkdown)
+library(e1071)
+library(caret)
 library(tinytex)
+library(gRain)
 
-# Load the dataset
+# Loading the dataset
 gene_data <- read.csv("BRCA_RNASeqv2_top50.csv", header = TRUE)
 
-# Remove the class variable (normal/cancer labels) as instructed
+# Removing the class variable (normal/cancer labels) as instructed
 gene_data_noclass <- gene_data[, -which(names(gene_data) == "class")]
 
-# Display the dimensions of the data
+# Displaying the dimensions of the data
 dim(gene_data_noclass)
 ```
 
 ## 1.3 Apply PC Algorithm
 
 ```{r pc-algorithm}
-# Prepare sufficient statistics for continuous data
+# Preparing sufficient statistics for continuous data
 suffStat <- list(C = cor(gene_data_noclass), n = nrow(gene_data_noclass))
 
-# Apply the PC algorithm
+# Applying the PC algorithm
 pc.fit <- pc(suffStat = suffStat, indepTest = gaussCItest, alpha = 0.01, labels = colnames(gene_data_noclass))
 
-# Plot the resulting CPDAG (Completed Partially Directed Acyclic Graph)
+# Plotting the resulting CPDAG (Completed Partially Directed Acyclic Graph)
 plot(pc.fit@graph)
 ```
-The above diagram was generated using the `pc()` algorithm, producing a **Completed Partially Directed Acyclic Graph (CPDAG)**. It reflects the estimated causal relationships among the 50 genes (excluding the class label):
+The above diagram was generated using the `pc()` algorithm, producing a **Completed Partially Directed Acyclic Graph (CPDAG)**. It reflects the estimated causal relationships among the 50 genes (excluding the class label).
+
+The resulting CPDAG was visualized, where:
+
+- **Nodes** represent individual genes.
+
+- **Edges** represent conditional dependencies.
+
+- **Directed edges** indicate inferred causal directionality where confident.
+
+- **Undirected edges** indicate relationships where the direction could not be determined under the data constraints.
 
 ### Interpretation:
 
-- Based on the above graph only **Directed edges** are present and they represent the potential direct causal influences from gene to gene.
+- Based on the above graph, only **Directed edges** are present and they represent the potential direct causal influences from gene to gene.
 - The graph is quite dense, suggesting **high inter-connectivity among genes**.
 - Some genes appear to have multiple incoming/outgoing connections, hinting at their potential centrality in the regulatory structure.
 
@@ -57,23 +101,71 @@ The above diagram was generated using the `pc()` algorithm, producing a **Comple
 
 # 2. Causal Inference on ABCA9
 
-## 2.1 IDA Method Introduction
+## 2.1 Description of the IDA Method
 
-The **IDA (Intervention calculus when DAG is Absent)** method allows estimation of causal effects from observational data based on the CPDAG output of the PC algorithm 【63†source】【64†source】.
+The IDA (Intervention-calculus when the DAG is Absent) method estimates possible causal effects when only the CPDAG is available. It is particularly suitable when dealing with observational data like BRCA-50.
 
-- **Input**: Graph from PC algorithm, covariance matrix, and target variable.
-- **Output**: Estimated causal effects.
+The IDA procedure involves the following steps:
+
+**Step 1: Estimating the CPDAG**
+
+- The PC algorithm is first applied to the dataset to generate a CPDAG that encodes the conditional independence structure among genes.
+- The CPDAG represents multiple DAGs that are consistent with the observed data.
+
+**Step 2: Estimating Causal Effects**
+
+- For each possible DAG consistent with the CPDAG, the causal effect of each gene (predictor) on the target gene (**ABCA9**) is estimated.
+- This is done using **linear regression**, where the coefficient of a predictor represents its estimated direct causal effect on the target, adjusting for parents in the DAG.
+
+The causal effect is estimated via multiple linear regression:
+
+  \[
+  Y = \beta_j X_j + \beta_{pa(X_j)} pa(X_j) + \epsilon
+  \]
+
+where:
+
+- \( Y \) is the target gene (ABCA9),
+
+- \( X_j \) is a candidate predictor gene,
+
+- \( pa(X_j) \) are the parents of \( X_j \) in the DAG,
+
+- \( \epsilon \) is the error term.
+
+For each valid DAG in the CPDAG equivalence class, compute the regression coefficient of a predictor gene \(X_j\) on a target gene \(Y\).
+
+**Step 3: Aggregating Effects**
+
+- Since multiple DAGs are possible, the IDA method computes causal effect estimates across all compatible DAGs.
+- For each gene, the **smallest absolute value** of the estimated effects is selected as the conservative estimate.
+
+### Why is the Minimum Absolute Value Taken?
+Since multiple DAGs are consistent with the CPDAG, there can be multiple possible causal effect values between two genes. To resolve this uncertainty:
+
+- The minimum absolute value of the estimated effects across all consistent DAGs is selected.
+
+- This is a conservative estimate, ensuring that we do not overstate the causal effect.
+
+- In biomedical studies, such conservative strategies are preferred to avoid false causal claims, especially given the serious implications in gene regulatory research.
+
+This aggregation ensures robustness against structural uncertainties in the inferred CPDAG.
+
+**Step 4: Ranking**
+
+- Genes are ranked based on their estimated strength of causal influence on the target.
+- Genes with higher absolute causal effect estimates are inferred to exert stronger influence on ABCA9’s expression.
 
 ## 2.2 Apply IDA on ABCA9
 
 ```{r ida-abca9}
-# Find the index of ABCA9 gene
+# Finding the index of ABCA9 gene
 abca9_index <- which(colnames(gene_data_noclass) == "ABCA9")
 
-# Create empty vector to store effects
+# Creatingg empty vector to store effects
 ida_results <- numeric(ncol(gene_data_noclass))
 
-# Loop through all potential cause genes (excluding ABCA9 itself)
+# Looping through all potential cause genes (excluding ABCA9 itself)
 for (i in 1:ncol(gene_data_noclass)) {
   if (i == abca9_index) {
     ida_results[i] <- 0  # No self-effect
@@ -88,69 +180,104 @@ for (i in 1:ncol(gene_data_noclass)) {
   }
 }
 
-# Create a table of causal effects
+# Creating a table of causal effects
 causal_effects <- data.frame(Gene = colnames(gene_data_noclass), Effect = ida_results)
 
-# Rank by the absolute value of causal effects
+# Ranking by the absolute value of causal effects
 causal_effects$AbsEffect <- abs(causal_effects$Effect)
 causal_effects <- causal_effects[order(-causal_effects$AbsEffect), ]
 
-# Display top 10 causes
+# Displaying sentence before table
+cat("The following table presents the top 10 genes with the strongest estimated causal effects on ABCA9:\n\n")
+
+# Displayig top 10 causes
 head(causal_effects, 10)
 ```
 
-## 2.3 Top 10 Strongest Causes Table
+## 2.3 Interpretation of the Output of Top 10 Causal Gene table
 
-The above table lists the top 10 genes which causally influence **ABCA9** based on absolute causal effect values in descending order.
+- The table above shows the output of the 10 genes with the highest causal effect on **ABCA9** in descending order.
+- **ABCA10** showed the strongest estimated causal influence on **ABCA9**, suggesting a close regulatory or co-expression relationship between these two in breast cancer.
+- **FXYD1** and **FIGF** also demonstrated significant effects, potentially implicating them in related processes known to influence cancer progression.
 
-### Interpretation of the Output of Top 10 Causal Gene table
-
-The table above shows the output of the 10 genes with the highest causal effect on **ABCA9** in descending order.
+These results provide a prioritized list of candidate genes that may regulate ABCA9 activity, highlighting targets for further experimental validation.
 
 ---
 
 # 3. Local Causal Structure Learning for EBF1
 
-## 3.1 IAMB Algorithm Introduction
+## 3.1 Markov Blanket Discovery using the IAMB Algorithm
 
-The **IAMB (Incremental Association Markov Blanket)** algorithm is a constraint-based local structure learning method implemented in the `bnlearn` package. It identifies the **Markov Blanket** of a target variable by incrementally including and removing features based on conditional independence tests.
+The Markov blanket of a gene contains all necessary variables for predicting its behavior — its parents, children, and spouses (parents of children).
 
-The Markov Blanket includes:
-- The parents of the node,
-- The children of the node,
-- And other parents of its children.
+The Markov blanket of **EBF1** was found using the **Incremental Association Markov Blanket (IAMB)** algorithm, implemented through `learn.mb()` from the **bnlearn** package. It identifies the **Markov Blanket** of a target variable by incrementally including and removing features based on conditional independence tests.
+
+The IAMB algorithm operates through two major phases:
+
+### **Step 1: Forward Phase (Growing the Blanket)**
+
+- Iteratively, variables are added to the candidate Markov blanket set based on their degree of association (e.g., mutual information or correlation) with the target variable.
+- Variables that are strongly associated are included first.
+- At each addition, the algorithm checks for conditional independence given the current set.
+
+### **Step 2: Backward Phase (Shrinking)**
+
+- After each addition, variables already included are re-tested.
+- If a variable becomes conditionally independent of the target given the rest of the blanket, it is removed.
+- This pruning ensures that only necessary variables remain, avoiding redundancy.
+
+This method reduces dimensionality and focuses analysis on the most relevant genes for breast cancer development, as its particularly suited for high-dimensional biological data such as gene expression datasets.
 
 ## 3.2 Apply IAMB Algorithm to EBF1
 
 ```{r iamb-ebf1}
-# Run IAMB to find Markov Blanket of EBF1
+# IAMB algorithm to find Markov Blanket of EBF1
 iamb_ebf1 <- learn.mb(gene_data_noclass,"EBF1", method = "iamb", alpha=0.01)
 iamb_ebf1
 ```
 
 ## 3.3 Genes in Markov Blanket of EBF1
 
-The genes returned represent the **Markov Blanket** of EBF1 according to the IAMB algorithm. These are variables that either influence EBF1 directly or share common children with it, and form the smallest set of variables that makes EBF1 conditionally independent of all others.
-
-The listed genes are the likely direct causes, direct effects, or co-parents of EBF1.
-Understanding the Markov Blanket helps prioritize genes for further biological validation.
+- The genes returned represent the **Markov Blanket** of EBF1 according to the IAMB algorithm. These are variables that either influence EBF1 directly or share common children with it, and form the smallest set of variables that makes EBF1 conditionally independent of all others.
+- The listed genes are the likely direct causes, direct effects, or co-parents of EBF1.
+- Understanding the Markov Blanket helps prioritize genes for further biological validation.
 
 ---
 
-# 4. Naïve Bayes Classification: Full vs PC-Set
+# 4. PC-Simple Algorithm and Naïve Bayes Classification
 
-## 4.1 Objective
+## 4.1 Description and Explanation of the PC-Simple Algorithm
 
-We compare classification accuracy using:
-- **All genes** as predictors (baseline)
-- **Only the parent and children set of the class variable** (discovered using PC-Simple)
+The **PC-Simple (PC-Select) algorithm** is a local structure learning method designed to identify the **parents and children set (PC-set)** of a specific target variable. The PC-Simple algorithm was applied to find the direct neighbors (causal associates) of the **class variable** (Normal vs. Cancer) based on discretized BRCA-50 gene expression data.
 
-We apply **Naïve Bayes classification with 5-fold cross-validation**.
+The procedure follows these main steps:
+
+- Step 1: **Initialization**:
+  - Starting with the assumption that all variables are potential neighbors of the target (Class).
+- Step 2: Iterative Conditional Independence Testing (**Pruning Phase**):
+  - For each candidate gene \( X \):
+    - Test whether \( X \) is conditionally independent of the class label, given subsets of other genes.
+    - If independence is detected at a given significance threshold (α = 0.01), the gene is **removed** from the PC-set.
+    - Otherwise, the gene is retained as a potential parent or child of the Class.
+  - The conditioning set size is increased iteratively to test for higher-order independencies.
+- Step 3: **Termination**:
+  - The algorithm terminates when no more variables can be pruned.
+  - The remaining genes are considered **direct causal associates** (either parents or children) of the class label.
 
 ## 4.2 Discretisation
 
+Prior to applying the PC-Simple algorithm:
+
+- The continuous gene expression values were **binarized**:
+  - Expression above the mean was categorized as **High (1)**.
+  - Expression below the mean was categorized as **Low (0)**.
+
+This transformation was necessary because the PC-Simple implementation and the subsequent Naïve Bayes classification model require discrete inputs.
+
+The class variable (Normal/Cancer) was treated as a binary categorical outcome.
+
 ```{r discretise}
-# Compute the average expression value across all genes and all samples
+# Computing the average expression value across all genes and all samples
 overall_mean <- mean(as.matrix(gene_data_noclass))
 
 # Discretise genes into binary (0 = Low, 1 = High) based on overall mean
@@ -159,18 +286,19 @@ for (col in colnames(disc_genes)) {
   disc_genes[[col]] <- ifelse(disc_genes[[col]] > overall_mean, 1, 0)
 }
 
-# Combine discretised gene data with the original class label
+# Combining discretised gene data with the original class label
 disc_data <- cbind(disc_genes, class = as.factor(gene_data$class))
+head(disc_data)
 ```
 
 ## 4.3 PC-Simple: Discover Parent/Children of Class
 
 ```{r pc-simple-class}
-# Prepare numeric version for PC-simple
+# Preparing numeric version for PC-simple
 disc_data_classnum <- disc_data
 disc_data_classnum$class <- as.numeric(disc_data_classnum$class)
 
-# Run PC-simple to find PC set of 'class'
+# PC-simple algorithm to find PC set of 'class'
 pc_class <- pcSelect(disc_data_classnum$class,
                       disc_data_classnum[, -which(names(disc_data_classnum) == "class")],
                       alpha = 0.05)
@@ -180,6 +308,8 @@ pc_genes
 ```
 
 ## 4.4 5-Fold Cross-Validation: All Genes vs PC Genes
+
+Both models were evaluated using 5-fold cross-validation. The reduced model aimed to maintain high predictive accuracy while improving model simplicity.
 
 ```{r nb-classification}
 set.seed(42)
@@ -203,7 +333,7 @@ for (i in 1:5) {
   acc_pc[i] <- mean(pred_pc == disc_data[test_idx, ]$class)
 }
 
-# Report average accuracy
+# Reporting average accuracy
 mean(acc_all)
 mean(acc_pc)
 ```
@@ -212,85 +342,265 @@ mean(acc_pc)
 
 - The **full model** uses all gene features, which may lead to overfitting or include noisy genes.
 - The **PC-set model** focuses only on genes that are directly linked to the class variable.
-- Comparing accuracies helps assess whether causal feature selection improves generalisation.
-- Using all genes for classification achieved a mean accuracy of **95.38%**.  
-- However, selecting only the parents and children of the class variable via PC-Simple and using them as features resulted in a higher mean accuracy of **98.27%**.
-- This demonstrates that causal feature selection can improve classification performance by reducing noise and focusing on the most relevant features.  
+- The Naïve Bayes model trained using only **PC-selected genes** significantly outperformed the model trained on all genes.
+- **All Genes Model (95.38%)**: Although the model achieved high accuracy, it may suffer from noise and irrelevant features, possibly leading to slight overfitting.
+- **PC-Selected Genes Model (98.27%)**: Restricting input features to direct causal neighbors of the class variable improved both performance and model simplicity. This supports the hypothesis that causal feature selection reduces noise and enhances generalization.
 - It suggests that many genes may not contribute useful information for predicting the class label, and that targeting a causally-relevant subset can lead to simpler and more accurate models.
 
 ---
 
 # 5. Bayesian Network Inference (Based on Provided Structure)
 
-## 5a. Construct Conditional Probability Tables (CPTs)
+## 5a. Constructing Conditional Probability Tables (CPTs)
 
-```{r construct-cpts}
-# Select relevant genes for the Bayesian network
+Steps in CPT Construction:
+
+1. **Marginal Probabilities for Root Nodes**:
+   - For nodes without parents (BTNL9), the marginal probability distribution is estimated directly from data.
+
+2. **Conditional Probabilities for Child Nodes**:
+   - For nodes with parents, the CPT specifies the probability of each child node state for every possible combination of parent states.
+   - Probabilities are estimated by computing relative frequencies from the discretized dataset.
+
+3. **Normalization**:
+   - Probabilities across all possible outcomes for a given parent configuration must sum to one, ensuring consistency of the probability tables.
+   
+### Manual Probability calculation
+
+```{r calculate-probabilities-5a}
+# Selecting relevant genes for Bayesian network
 disc_selected <- disc_data[, c("CD300LG", "BTNL9", "IGSF10", "ABCA9", "class")]
 
-# Compute CPTs
-cpt_cd300lg <- table(disc_selected$CD300LG) / nrow(disc_selected)
-cpt_btnl9_given_cd300lg <- prop.table(table(disc_selected$BTNL9, disc_selected$CD300LG), margin = 2)
-cpt_class_given_cd300lg <- prop.table(table(disc_selected$class, disc_selected$CD300LG), margin = 2)
-cpt_igsf10_given_class <- prop.table(table(disc_selected$IGSF10, disc_selected$class), margin = 2)
-cpt_abca9_given_igsf10_btnl9 <- prop.table(table(disc_selected$ABCA9, disc_selected$IGSF10, disc_selected$BTNL9), margin = c(2, 3))
+# Marginal probability of BTNL9
+p_btnl9 <- prop.table(table(disc_selected$BTNL9))
 
-# Display CPTs
-cpt_cd300lg
-cpt_btnl9_given_cd300lg
-cpt_class_given_cd300lg
-cpt_igsf10_given_class
-cpt_abca9_given_igsf10_btnl9
+# Conditional probabilities
+p_cd300lg_given_btnl9 <- prop.table(table(disc_selected$CD300LG, disc_selected$BTNL9), margin=2)
+p_class_given_cd300lg <- prop.table(table(disc_selected$class, disc_selected$CD300LG), margin=2)
+p_igsf10_given_class <- prop.table(table(disc_selected$IGSF10, disc_selected$class), margin=2)
+p_abca9_given_igsf10_btnl9 <- prop.table(table(disc_selected$ABCA9, disc_selected$IGSF10, disc_selected$BTNL9), margin=c(2,3))
 ```
 
-## 5b. Estimate Probability: All Genes High
+### Creating CPTs:
 
-```{r probability-all-high}
-# Compute P(CD300LG=1) * P(BTNL9=1|CD300LG=1) * P(class=C|CD300LG=1) * P(IGSF10=1|class=C) * P(ABCA9=1|IGSF10=1, BTNL9=1)
+```{r define-cptables-5a}
+# Marginal Probability of BTNL9
+cpt_btnl9 <- cptable(~BTNL9, values=c(p_btnl9["0"], p_btnl9["1"]), levels=c("0", "1"))
 
-p_cd300lg_1 <- cpt_cd300lg["1"]
-p_btnl9_1_given_cd300lg_1 <- cpt_btnl9_given_cd300lg["1", "1"]
-p_class_c_given_cd300lg_1 <- cpt_class_given_cd300lg["C", "1"]
-p_igsf10_1_given_class_c <- cpt_igsf10_given_class["1", "C"]
-p_abca9_1_given_igsf10_1_btnl9_1 <- cpt_abca9_given_igsf10_btnl9["1", "1", "1"]
+# Conditional Probability of CD300LG Given BTNL9
+cpt_cd300lg_btnl9 <- cptable(~CD300LG|BTNL9, values=c(
+  p_cd300lg_given_btnl9["0","0"], p_cd300lg_given_btnl9["1","0"],
+  p_cd300lg_given_btnl9["0","1"], p_cd300lg_given_btnl9["1","1"]
+), levels=c("0","1"))
 
-p_joint_all_high <- p_cd300lg_1 * p_btnl9_1_given_cd300lg_1 * p_class_c_given_cd300lg_1 * p_igsf10_1_given_class_c * p_abca9_1_given_igsf10_1_btnl9_1
+# Conditional Probability of Class Given CD300LG
+cpt_class_cd300lg <- cptable(~class|CD300LG, values=c(
+  p_class_given_cd300lg["N","0"], p_class_given_cd300lg["C","0"],
+  p_class_given_cd300lg["N","1"], p_class_given_cd300lg["C","1"]
+), levels=c("N","C"))
 
-p_joint_all_high
+# Conditional Probability of IGSF10 Given Class
+cpt_igsf10_class <- cptable(~IGSF10|class, values=c(
+  p_igsf10_given_class["0","N"], p_igsf10_given_class["1","N"],
+  p_igsf10_given_class["0","C"], p_igsf10_given_class["1","C"]
+), levels=c("0","1"))
+
+# Conditional Probability of ABCA9 Given BTNL9 and IGSF10
+cpt_abca9_igsf10_btnl9 <- cptable(~ABCA9|IGSF10:BTNL9, values=c(
+  p_abca9_given_igsf10_btnl9["0","0","0"], p_abca9_given_igsf10_btnl9["1","0","0"],
+  p_abca9_given_igsf10_btnl9["0","1","0"], p_abca9_given_igsf10_btnl9["1","1","0"],
+  p_abca9_given_igsf10_btnl9["0","0","1"], p_abca9_given_igsf10_btnl9["1","0","1"],
+  p_abca9_given_igsf10_btnl9["0","1","1"], p_abca9_given_igsf10_btnl9["1","1","1"]
+), levels=c("0","1"))
+
+# Compiling CPTs in correct causal order
+cpt_list <- compileCPT(list(cpt_btnl9, cpt_cd300lg_btnl9, cpt_class_cd300lg, cpt_igsf10_class, cpt_abca9_igsf10_btnl9))
+
+# Plotting structure for visual confirmation
+plot(bnlearn::as.bn(grain(cpt_list)))
 ```
 
-## 5c. Estimate Probability: Cancer given CD300LG High, BTNL9 Low
+---
 
-To estimate the probability of having cancer when CD300LG = High (1) and BTNL9 = Low (0), we consider the structure of the Bayesian network.
+# 5b. Creating Bayesian Network and Query Probabilities
+
+```{r create-grain-5b}
+# Creating Bayesian Network
+grain_net <- grain(cpt_list)
+
+# Querying joint probability: all four genes are high
+joint_prob_all_high <- querygrain(grain_net, nodes=c("CD300LG","BTNL9","IGSF10","ABCA9"), type="joint")["1","1","1","1"]
+
+# Querying individual probabilities of each gene being high
+prob_cd300lg_high <- querygrain(grain_net, nodes="CD300LG")$CD300LG["1"]
+prob_btnl9_high <- querygrain(grain_net, nodes="BTNL9")$BTNL9["1"]
+prob_igsf10_high <- querygrain(grain_net, nodes="IGSF10")$IGSF10["1"]
+prob_abca9_high <- querygrain(grain_net, nodes="ABCA9")$ABCA9["1"]
+
+# Displaying probabilities in clear format
+cat("The individual probabilities of the genes having high expression levels are: 
+")
+
+cat(sprintf("- P(CD300LG = High) = %.6f
+", prob_cd300lg_high))
+
+cat(sprintf("- P(BTNL9 = High) = %.6f
+", prob_btnl9_high))
+
+cat(sprintf("- P(IGSF10 = High) = %.6f
+", prob_igsf10_high))
+
+cat(sprintf("- P(ABCA9 = High) = %.6f
+", prob_abca9_high))
+
+cat("
+The joint probability of all four genes being high is:
+")
+
+cat(sprintf("- P(CD300LG = 1, BTNL9 = 1, IGSF10 = 1, ABCA9 = 1) = %.6f
+", joint_prob_all_high))
+```
+
+## 5c. Estimate Probability: P(class = C | CD300LG = 1, BTNL9 = 0)
+
+To estimate the probability of having cancer when CD300LG = High (1) and BTNL9 = Low (0), the structure of the Bayesian network is considered.
 
 In the given structure, class is a direct child of CD300LG and does not have BTNL9 as a parent. This means that class depends only on CD300LG and is conditionally independent of BTNL9 given CD300LG.
 
 Thus, the conditional probability P(class = C | CD300LG = 1, BTNL9 = 0) simplifies to P(class = C | CD300LG = 1).
 
-```{r probability-cancer}
-# Extract P(class = C | CD300LG = 1) directly from CPT
-p_class_c_given_cd300lg_1 <- cpt_class_given_cd300lg["C", "1"]
-p_class_c_given_cd300lg_1
+```{r query-5c}
+# evidence setting and querying using grain_net
+p_class_c_given_cd1_bt0 <- querygrain(setEvidence(grain_net, evidence=list(CD300LG="1", BTNL9="0")), nodes="class")$class["C"]
+
+# Result display
+cat("The conditional probability of having cancer given CD300LG = High and BTNL9 = Low is:\n\n")
+cat(sprintf("- P(class = C | CD300LG = High, BTNL9 = Low) = %.6f\n", p_class_c_given_cd1_bt0))
 ```
 
-The resulting probability is approximately **0.2585**.
+---
+
+# 5d. Mathematical Proof for 5c
+
+## Mathematical Validation of Conditional Probability Using Bayes' Theorem
+
+We aim to mathematically prove the validity of the computed conditional probability:
+
+\[
+P(\text{Cancer} \mid \text{CD300LG} = \text{High}, \text{BTNL9} = \text{Low})
+\]
+
+Starting from Bayes' theorem:
+
+\[
+P(A \mid B) = \frac{P(A, B)}{P(B)}
+\]
+
+Applying it to the context:
+
+\[
+P(\text{Cancer} \mid \text{CD300LG} = \text{High}, \text{BTNL9} = \text{Low}) = \frac{P(\text{Cancer}, \text{CD300LG} = \text{High}, \text{BTNL9} = \text{Low})}{P(\text{CD300LG} = \text{High}, \text{BTNL9} = \text{Low})}
+\]
+
+The **joint probability** \( P(\text{Cancer}, \text{CD300LG} = \text{High}, \text{BTNL9} = \text{Low}) \) can be factorized as:
+
+\[
+P(\text{Cancer} \mid \text{CD300LG} = \text{High}) \times P(\text{CD300LG} = \text{High} \mid \text{BTNL9} = \text{Low}) \times P(\text{BTNL9} = \text{Low})
+\]
+
+The **marginal probability** \( P(\text{CD300LG} = \text{High}, \text{BTNL9} = \text{Low}) \) is:
+
+\[
+P(\text{CD300LG} = \text{High} \mid \text{BTNL9} = \text{Low}) \times P(\text{BTNL9} = \text{Low})
+\]
+
+Thus:
+
+\[
+P(\text{Cancer} \mid \text{CD300LG} = \text{High}, \text{BTNL9} = \text{Low}) = \frac{P(\text{Cancer} \mid \text{CD300LG} = \text{High}) \times P(\text{CD300LG} = \text{High} \mid \text{BTNL9} = \text{Low}) \times P(\text{BTNL9} = \text{Low})}{P(\text{CD300LG} = \text{High} \mid \text{BTNL9} = \text{Low}) \times P(\text{BTNL9} = \text{Low})}
+\]
+
+Simplifying:
+
+\[
+P(\text{Cancer} \mid \text{CD300LG} = \text{High}, \text{BTNL9} = \text{Low}) = P(\text{Cancer} \mid \text{CD300LG} = \text{High})
+\]
 
 ---
 
-## 5d. Mathematical Proof for 5c
+## Proof via Network Structure and Conditional Independence
 
-We aim to justify mathematically that:
+The Bayesian network structure is:
 
-**P(class = C | CD300LG = 1, BTNL9 = 0) = P(class = C | CD300LG = 1)**
+\[
+\text{BTNL9} \rightarrow \text{CD300LG} \rightarrow \text{class}
+\]
 
-This equality holds based on the structure of the Bayesian network and the properties of d-separation.
+From the **Markov condition** for Bayesian networks:
+> A node is conditionally independent of its non-descendants given its parents.
 
-In the provided Bayesian network, the variable class is only conditionally dependent on CD300LG, meaning CD300LG is its only parent node. BTNL9 is not a parent nor a child of class. Therefore, by the **Markov condition**, class is conditionally independent of any non-descendant node given its parent.
+Here:
+- **class** has **CD300LG** as its only parent.
+- **BTNL9** is neither a parent nor a descendant of **class**.
 
-Hence, we conclude:
+Thus, given **CD300LG**, **class** is independent of **BTNL9**:
 
-**P(class = C | CD300LG = 1, BTNL9 = 0) = P(class = C | CD300LG = 1)**
+\[
+P(\text{class} \mid \text{CD300LG}, \text{BTNL9}) = P(\text{class} \mid \text{CD300LG})
+\]
 
-The result used in part 5c is therefore validated mathematically by the network’s conditional independence assumptions.
+In the context:
+
+\[
+P(\text{Class = Cancer} \mid \text{CD300LG = High}, \text{BTNL9 = Low}) = P(\text{Class = Cancer} \mid \text{CD300LG = High})
+\]
+
+Thus, the equality required for the computation is **mathematically justified** by the conditional independence implied by the network.
+
+## Final Conclusion
+
+Both:
+
+- The direct computation via **Bayes' theorem**, and
+
+- The **structural independence** from the **Bayesian network topology**
+
+confirm that:
+
+\[
+P(\text{Class = Cancer} \mid \text{CD300LG = High}, \text{BTNL9 = Low}) = P(\text{Class = Cancer} \mid \text{CD300LG = High})
+\]
+
+Hence, the result obtained in Part 5c is mathematically proven to be valid.
 
 ---
+
+# 5e. Conditional Independence Assessment: class ⫫ ABCA9 | IGSF10
+
+From the correct structure:
+- class → IGSF10 → ABCA9
+- BTNL9 also influences ABCA9, but not class
+
+Once IGSF10 is known, the path from class to ABCA9 is blocked (serial connection). Thus:
+
+> **class ⫫ ABCA9 | IGSF10** by d-separation.
+
+This confirms the conditional independence.
+
+Conditional independence means:
+\[
+P(\text{Class} \mid \text{CD300LG}, \text{ABCA9}) = P(\text{Class} \mid \text{CD300LG})
+\]
+
+This is true **only if** CD300LG **blocks** all information from ABCA9 regarding the class.
+
+- If ABCA9 is **not a parent, child, or spouse** of Class in the network after conditioning on CD300LG, then **Class and ABCA9 are conditionally independent given CD300LG**.
+- If there is a **direct path or unblocked collider path** between ABCA9 and Class (after conditioning), then **they are not independent**.
+
+Thus:
+
+- If CD300LG "d-separates" (blocks) ABCA9 and Class, then **Yes, they are conditionally independent**.
+
+- Otherwise, **No, they are not independent**.
+
+The answer depends on the structure of the Bayesian network around ABCA9, CD300LG, and Class.
